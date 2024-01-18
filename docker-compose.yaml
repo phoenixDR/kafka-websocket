@@ -1,0 +1,43 @@
+version: '2.1'
+services:
+  zookeeper:
+    env_file:
+      - ./.env
+    image: wurstmeister/zookeeper
+    ports:
+      - "2181:2181"
+
+  kafka:
+    image: wurstmeister/kafka
+    env_file:
+      - ./.env
+    depends_on:
+      - zookeeper
+    ports:
+      - '9092:9092'
+      - '9093:9093'
+
+  kafka-ui:
+    container_name: kafka-ui
+    image: provectuslabs/kafka-ui:latest
+    env_file:
+      - ./.env
+    ports:
+      - 8082:8080
+    depends_on:
+      - kafka
+
+  producer:
+    build:
+      context: .
+      dockerfile: ./cmd/producer/Dockerfile
+    depends_on:
+      - kafka
+  consumer:
+      build:
+        context: .
+        dockerfile: ./cmd/consumer/Dockerfile
+      ports:
+        - "8888:8888"
+      depends_on:
+        - kafka
