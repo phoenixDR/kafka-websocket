@@ -23,6 +23,7 @@ type server struct {
 	register   chan *Client
 	unregister chan *Client
 	mutex      sync.Mutex
+	mutexRW    sync.RWMutex
 }
 
 var wsServer = server{
@@ -32,36 +33,61 @@ var wsServer = server{
 	clients:    make(map[*Client]bool),
 }
 
+type wsMessage struct {
+	Action string `json:"action"`
+	Topic  string `json:"topic"`
+}
+
 func (s *server) run() {
 	for {
 		select {
 		case client := <-s.register:
-			s.mutex.Lock()
-			s.clients[client] = true
-			s.mutex.Unlock()
+			s.registerClient(client)
 		case client := <-s.unregister:
-			s.mutex.Lock()
-			if _, ok := s.clients[client]; ok {
-				delete(s.clients, client)
-				client.Conn.Close()
-			}
-			s.mutex.Unlock()
+			s.unregisterClient(client)
 		case message := <-s.broadcast:
-			s.mutex.Lock()
-			for client := range s.clients {
-				for topic := range client.Subscribed {
-					if client.Subscribed[topic] {
-						err := websocket.Message.Send(client.Conn, message)
-						if err != nil {
-							log.Printf("WebSocket send error: %v", err)
-							client.Conn.Close()
-							delete(s.clients, client)
-						}
-					}
-				}
-			}
-			s.mutex.Unlock()
+			s.broadcastMessage(message)
 		}
+	}
+}
+
+func (s *server) registerClient(client *Client) {
+	s.mutex.Lock()
+	s.clients[client] = true
+	s.mutex.Unlock()
+}
+
+func (s *server) unregisterClient(client *Client) {
+	s.mutexRW.RLock()
+	if _, ok := s.clients[client]; ok {
+		s.mutexRW.RUnlock()
+		s.mutexRW.Lock()
+		delete(s.clients, client)
+		client.Conn.Close()
+		s.mutexRW.Unlock()
+	} else {
+		s.mutexRW.RUnlock()
+	}
+}
+
+func (s *server) broadcastMessage(message string) {
+	s.mutex.Lock()
+	for client := range s.clients {
+		for topic := range client.Subscribed {
+			if client.Subscribed[topic] {
+				s.sendMessageToClient(client, message)
+			}
+		}
+	}
+	s.mutex.Unlock()
+}
+
+func (s *server) sendMessageToClient(client *Client, message string) {
+	err := websocket.Message.Send(client.Conn, message)
+	if err != nil {
+		log.Printf("WebSocket send error: %v", err)
+		client.Conn.Close()
+		delete(s.clients, client)
 	}
 }
 
@@ -84,22 +110,22 @@ func handleWebSocketConnection(ws *websocket.Conn) {
 			break
 		}
 
-		var msg map[string]string
+		var msg wsMessage
 		if err := json.Unmarshal([]byte(message), &msg); err != nil {
 			log.Printf("JSON unmarshal error: %v", err)
 			continue
 		}
 
-		action, ok := msg["action"]
-		if !ok {
-			log.Println("Invalid message: missing 'action' key")
+		action := msg.Action
+		if action == "" {
+			websocket.Message.Send(client.Conn, fmt.Sprintln("Invalid message: missing 'action' key"))
 			continue
 		}
 		action = strings.ToLower(action)
 
-		topic, ok := msg["topic"]
-		if !ok {
-			log.Println("Invalid message: missing 'topic' key")
+		topic := msg.Topic
+		if topic == "" {
+			websocket.Message.Send(client.Conn, fmt.Sprintln("Invalid message: missing 'topic' key"))
 			continue
 		}
 		topic = strings.ToLower(topic)
