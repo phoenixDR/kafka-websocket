@@ -17,10 +17,10 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	kafkaHost, kafkaPort, topic, consumerGroup, wsServerPort := utils.LoadEnv()
-	brokerAddress := kafkaHost + ":" + kafkaPort
+	cfg := utils.LoadConfig()
+	brokerAddress := cfg.Kafka.Host + ":" + cfg.Kafka.Port
 	kafkaBrokers := []string{brokerAddress}
-	kafkaConsumer, err := consumer.NewKafkaConsumer(kafkaBrokers, topic, consumerGroup)
+	kafkaConsumer, err := consumer.NewKafkaConsumer(kafkaBrokers, cfg.Kafka.Topic, cfg.Kafka.ConsumerGroup)
 
 	if err != nil {
 		log.Fatalf("Error initializing Kafka consumer: %v", err)
@@ -30,7 +30,7 @@ func main() {
 		retryCount := 0
 		maxRetries := 5
 		for {
-			if utils.KafkaIsHealthy(brokerAddress, topic) {
+			if utils.KafkaIsHealthy(brokerAddress, cfg.Kafka.Topic) {
 				retryCount = 0
 			} else {
 				retryCount++
@@ -49,7 +49,7 @@ func main() {
 
 	msgChan := make(chan string)
 	go kafkaConsumer.Consume(ctx, msgChan)
-	go websocket.StartWebSocketServer(":" + wsServerPort)
+	go websocket.StartWebSocketServer(":" + cfg.Websocket.Port)
 
 	go func() {
 		for {

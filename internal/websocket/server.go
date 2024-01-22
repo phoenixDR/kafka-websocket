@@ -67,7 +67,7 @@ func (s *server) run() {
 
 func handleWebSocketConnection(ws *websocket.Conn) {
 	client := &Client{Conn: ws, Subscribed: make(map[string]bool)}
-	_, _, validTopic, _, _ := utils.LoadEnv()
+	cfg := utils.LoadConfig()
 	wsServer.mutex.Lock()
 	wsServer.register <- client
 	wsServer.mutex.Unlock()
@@ -106,7 +106,7 @@ func handleWebSocketConnection(ws *websocket.Conn) {
 
 		switch action {
 		case "subscribe":
-			if topic != validTopic {
+			if topic != cfg.Kafka.Topic {
 				websocket.Message.Send(
 					client.Conn, fmt.Sprintf("Invalid subscription request for unknown topic: %s", topic))
 

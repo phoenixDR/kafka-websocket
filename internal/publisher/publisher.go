@@ -24,16 +24,16 @@ var (
 func PublishDummyMessages(ctx context.Context) {
 	flag.Parse()
 
-	kafkaHost, kafkaPort, topic, _, _ := utils.LoadEnv()
-	brokerAddress := kafkaHost + ":" + kafkaPort
+	cfg := utils.LoadConfig()
+	brokerAddress := cfg.Kafka.Host + ":" + cfg.Kafka.Port
 	rand.Seed(time.Now().UnixNano())
 
-	err := createTopicIfNotExist(brokerAddress, topic, 1, 1)
+	err := createTopicIfNotExist(brokerAddress, cfg.Kafka.Topic, 1, 1)
 	if err != nil {
 		log.Fatal("Creation topic process got error:", err)
 	}
 
-	conn, err := getKafkaConnection(nil, brokerAddress, topic)
+	conn, err := getKafkaConnection(nil, brokerAddress, cfg.Kafka.Topic)
 	if err != nil {
 		log.Fatal("Failed to set up initial Kafka connection:", err)
 	}
@@ -52,8 +52,8 @@ func PublishDummyMessages(ctx context.Context) {
 			log.Println("Publisher shutting down.")
 			return
 		case <-ticker.C:
-			if utils.KafkaIsHealthy(brokerAddress, topic) {
-				publishMessages(&conn, brokerAddress, topic)
+			if utils.KafkaIsHealthy(brokerAddress, cfg.Kafka.Topic) {
+				publishMessages(&conn, brokerAddress, cfg.Kafka.Topic)
 			} else {
 				log.Println("Kafka is not healthy. Skipping message publish.")
 			}
