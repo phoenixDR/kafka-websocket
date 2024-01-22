@@ -21,28 +21,34 @@ var (
 	intervalFlag = flag.Duration("interval", 5*time.Second, "Interval between messages")
 )
 
-func PublishDummyMessages(ctx context.Context) {
+type Publisher struct {
+	cfg           utils.Config
+	brokerAddress string
+	conn          *kafka.Conn
+}
+
+func NewPublisher() (*Publisher, error) {
+	p := &Publisher{}
+	err := p.Init()
+	if err != nil {
+		return nil, err
+	}
+	return p, nil
+}
+
+func (p *Publisher) Init() error {
 	flag.Parse()
-
-	cfg := utils.LoadConfig()
-	brokerAddress := cfg.Kafka.Host + ":" + cfg.Kafka.Port
-	rand.Seed(time.Now().UnixNano())
-
-	err := createTopicIfNotExist(brokerAddress, cfg.Kafka.Topic, 1, 1)
+	p.cfg = utils.LoadConfig()
+	p.brokerAddress = p.cfg.Kafka.Host + ":" + p.cfg.Kafka.Port
+	conn, err := p.getKafkaConnection(p.cfg.Kafka.Topic)
 	if err != nil {
-		log.Fatal("Creation topic process got error:", err)
+		return fmt.Errorf("failed to establish initial Kafka connection: %w", err)
 	}
+	p.conn = conn
+	return p.createTopicIfNotExist(p.cfg.Kafka.Topic, 1, 1)
+}
 
-	conn, err := getKafkaConnection(nil, brokerAddress, cfg.Kafka.Topic)
-	if err != nil {
-		log.Fatal("Failed to set up initial Kafka connection:", err)
-	}
-	defer func() {
-		if conn != nil {
-			conn.Close()
-		}
-	}()
-
+func (p *Publisher) PublishDummyMessages(ctx context.Context) {
 	ticker := time.NewTicker(*intervalFlag)
 	defer ticker.Stop()
 
@@ -52,8 +58,8 @@ func PublishDummyMessages(ctx context.Context) {
 			log.Println("Publisher shutting down.")
 			return
 		case <-ticker.C:
-			if utils.KafkaIsHealthy(brokerAddress, cfg.Kafka.Topic) {
-				publishMessages(&conn, brokerAddress, cfg.Kafka.Topic)
+			if utils.KafkaIsHealthy(p.brokerAddress, p.cfg.Kafka.Topic) {
+				p.publishMessages()
 			} else {
 				log.Println("Kafka is not healthy. Skipping message publish.")
 			}
@@ -61,19 +67,14 @@ func PublishDummyMessages(ctx context.Context) {
 	}
 }
 
-func publishMessages(conn **kafka.Conn, brokerAddress, topic string) {
+func (p *Publisher) publishMessages() {
 	cryptos := []string{"BTC", "ETH", "LTC"}
-	var err error
 
 	for _, crypto := range cryptos {
 		message := fmt.Sprintf("%s: %f", crypto, randomPrice())
-		*conn, err = sendMessage(*conn, message, brokerAddress, topic)
+		err := p.sendMessage(message)
 		if err != nil {
 			log.Println("Error sending message:", err)
-			if *conn != nil {
-				(*conn).Close()
-				*conn = nil
-			}
 		} else {
 			log.Println("Message sent successfully")
 		}
@@ -82,36 +83,23 @@ func publishMessages(conn **kafka.Conn, brokerAddress, topic string) {
 	}
 }
 
-func getKafkaConnection(currentConn *kafka.Conn, brokerAddress, topic string) (*kafka.Conn, error) {
-	if currentConn != nil {
-		return currentConn, nil
-	}
-
-	conn, err := kafka.DialLeader(context.Background(), "tcp", brokerAddress, topic, 0)
-	if err != nil {
-		return nil, fmt.Errorf("failed to dial leader: %w", err)
-	}
-
-	return conn, nil
-}
-
-func sendMessage(conn *kafka.Conn, message string, brokerAddress, topic string) (*kafka.Conn, error) {
+func (p *Publisher) sendMessage(message string) error {
 	maxRetries := 5
 	retryInterval := time.Second
 
 	for attempt := 0; attempt < maxRetries; attempt++ {
-		_, err := conn.WriteMessages(kafka.Message{Value: []byte(message)})
+		_, err := p.conn.WriteMessages(kafka.Message{Value: []byte(message)})
 		if err == nil {
-			return conn, nil
+			return nil
 		}
 
-		if isConnectionError(err) {
-			conn.Close()
-			conn, err = getKafkaConnection(nil, brokerAddress, topic)
+		if p.isConnectionError(err) {
+			p.conn.Close()
+			conn, err := p.getKafkaConnection(p.cfg.Kafka.Topic)
 			if err != nil {
-				return nil, fmt.Errorf("failed to re-establish connection: %w", err)
+				return fmt.Errorf("failed to re-establish connection: %w", err)
 			}
-
+			p.conn = conn
 			continue
 		}
 
@@ -119,10 +107,10 @@ func sendMessage(conn *kafka.Conn, message string, brokerAddress, topic string) 
 		time.Sleep(retryInterval)
 	}
 
-	return nil, fmt.Errorf("failed to send message after %d attempts", maxRetries)
+	return fmt.Errorf("failed to send message after %d attempts", maxRetries)
 }
 
-func isConnectionError(err error) bool {
+func (p *Publisher) isConnectionError(err error) bool {
 	var netErr net.Error
 	if errors.As(err, &netErr) {
 		return true
@@ -143,12 +131,12 @@ func isConnectionError(err error) bool {
 	return false
 }
 
-func createTopicIfNotExist(brokerAddress, topic string, partition, replicationFactor int) error {
+func (p *Publisher) createTopicIfNotExist(topic string, partition, replicationFactor int) error {
 	maxRetries := 5
 	backoff := time.Second
 	maxBackoff := time.Minute
 
-	conn, err := kafka.Dial("tcp", brokerAddress)
+	conn, err := kafka.Dial("tcp", p.brokerAddress)
 	if err != nil {
 		return fmt.Errorf("failed to dial Kafka: %w", err)
 	}
@@ -206,6 +194,13 @@ func createTopicIfNotExist(brokerAddress, topic string, partition, replicationFa
 func randomPrice() float64 {
 	minPrice := 10.00
 	maxPrice := 100.00
-
 	return minPrice + rand.Float64()*(maxPrice-minPrice)
+}
+
+func (p *Publisher) getKafkaConnection(topic string) (*kafka.Conn, error) {
+	conn, err := kafka.DialLeader(context.Background(), "tcp", p.brokerAddress, topic, 0)
+	if err != nil {
+		return nil, fmt.Errorf("failed to dial leader: %w", err)
+	}
+	return conn, nil
 }

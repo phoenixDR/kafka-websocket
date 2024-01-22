@@ -11,10 +11,15 @@ import (
 )
 
 func main() {
+	p, err := publisher.NewPublisher()
+	if err != nil {
+		log.Fatal("Error initializing publisher:", err)
+	}
+
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	go publisher.PublishDummyMessages(ctx)
+	go p.PublishDummyMessages(ctx)
 
 	signalChan := make(chan os.Signal, 1)
 	signal.Notify(signalChan, syscall.SIGINT, syscall.SIGTERM)
