@@ -40,12 +40,22 @@ A step-by-step series of examples that tell how to get a development environment
 
 1. Clone the repository to local machine.
 2. Navigate to the root directory of the project.
-3. Run the following command to start all services:
+3. Run the following command to start kafka services:
 
    ```bash
-   docker-compose up --build
+   docker-compose up
 
-This command builds and starts all the services defined in docker-compose.yaml file, including producer and consumer microservices, Kafka, Zookeeper, and Kafka-UI.
+This command builds and starts all the services defined in docker-compose.yaml file Kafka, Zookeeper, and Kafka-UI.
+
+For proper start of the consumer and producer services run them in terminal in separate windows:
+
+```bash
+ go run ./cmd/consumer
+```
+and
+```bash
+ go run ./cmd/producer
+```
 
 #### Accessing Kafka-UI
 Open a web browser and navigate to http://localhost:8082 to access Kafka-UI.

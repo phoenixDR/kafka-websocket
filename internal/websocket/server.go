@@ -12,25 +12,44 @@ import (
 	"golang.org/x/net/websocket"
 )
 
+type WsConnection interface {
+	Close() error
+	Read(msg []byte) (int, error)
+	Write(msg []byte) (int, error)
+	SendMessage(message string) error
+}
+
+type RealConnWrapper struct {
+	*websocket.Conn
+}
+
 type Client struct {
-	Conn       *websocket.Conn
+	Conn       WsConnection
 	Subscribed map[string]bool
 }
 
-type server struct {
-	clients    map[*Client]bool
-	broadcast  chan string
-	register   chan *Client
-	unregister chan *Client
-	mutex      sync.Mutex
-	mutexRW    sync.RWMutex
+type WsServerInterface interface {
+	Run()
+	RegisterClient(client *Client)
+	UnregisterClient(client *Client)
+	BroadcastMessage(message string)
+	SendMessageToClient(client *Client, message string)
 }
 
-var wsServer = server{
-	broadcast:  make(chan string),
-	register:   make(chan *Client),
-	unregister: make(chan *Client),
-	clients:    make(map[*Client]bool),
+type Server struct {
+	Clients    map[*Client]bool
+	Broadcast  chan string
+	Register   chan *Client
+	Unregister chan *Client
+	Mutex      sync.Mutex
+	MutexRW    sync.RWMutex
+}
+
+var wsServer = Server{
+	Broadcast:  make(chan string),
+	Register:   make(chan *Client),
+	Unregister: make(chan *Client),
+	Clients:    make(map[*Client]bool),
 }
 
 type wsMessage struct {
@@ -38,67 +57,76 @@ type wsMessage struct {
 	Topic  string `json:"topic"`
 }
 
-func (s *server) run() {
+func (s *Server) Run() {
 	for {
 		select {
-		case client := <-s.register:
-			s.registerClient(client)
-		case client := <-s.unregister:
-			s.unregisterClient(client)
-		case message := <-s.broadcast:
-			s.broadcastMessage(message)
+		case client := <-s.Register:
+			s.RegisterClient(client)
+		case client := <-s.Unregister:
+			s.UnregisterClient(client)
+		case message := <-s.Broadcast:
+			s.BroadcastMessage(message)
 		}
 	}
 }
 
-func (s *server) registerClient(client *Client) {
-	s.mutex.Lock()
-	s.clients[client] = true
-	s.mutex.Unlock()
-}
-
-func (s *server) unregisterClient(client *Client) {
-	s.mutexRW.RLock()
-	if _, ok := s.clients[client]; ok {
-		s.mutexRW.RUnlock()
-		s.mutexRW.Lock()
-		delete(s.clients, client)
-		client.Conn.Close()
-		s.mutexRW.Unlock()
-	} else {
-		s.mutexRW.RUnlock()
+func (s *Server) RegisterClient(client *Client) {
+	if client != nil {
+		s.Mutex.Lock()
+		s.Clients[client] = true
+		s.Mutex.Unlock()
 	}
 }
 
-func (s *server) broadcastMessage(message string) {
-	s.mutex.Lock()
-	for client := range s.clients {
+func (s *Server) UnregisterClient(client *Client) {
+	if client != nil {
+		s.MutexRW.RLock()
+		if _, ok := s.Clients[client]; ok {
+			s.MutexRW.RUnlock()
+			s.MutexRW.Lock()
+			delete(s.Clients, client)
+			client.Conn.Close()
+			s.MutexRW.Unlock()
+		} else {
+			s.MutexRW.RUnlock()
+		}
+	}
+}
+
+func (s *Server) BroadcastMessage(message string) {
+	s.Mutex.Lock()
+	for client := range s.Clients {
 		for topic := range client.Subscribed {
 			if client.Subscribed[topic] {
-				s.sendMessageToClient(client, message)
+				s.SendMessageToClient(client, message)
 			}
 		}
 	}
-	s.mutex.Unlock()
+	s.Mutex.Unlock()
 }
 
-func (s *server) sendMessageToClient(client *Client, message string) {
-	err := websocket.Message.Send(client.Conn, message)
-	if err != nil {
-		log.Printf("WebSocket send error: %v", err)
-		client.Conn.Close()
-		delete(s.clients, client)
+func (rcw *RealConnWrapper) SendMessage(message string) error {
+	return websocket.Message.Send(rcw.Conn, message)
+}
+
+func (s *Server) SendMessageToClient(client *Client, message string) {
+	if client != nil {
+		if err := client.Conn.SendMessage(message); err != nil {
+			log.Printf("WebSocket send error: %v", err)
+			client.Conn.Close()
+			delete(s.Clients, client)
+		}
 	}
 }
 
 func handleWebSocketConnection(ws *websocket.Conn) {
-	client := &Client{Conn: ws, Subscribed: make(map[string]bool)}
+	client := &Client{Conn: &RealConnWrapper{Conn: ws}, Subscribed: make(map[string]bool)}
 	cfg := utils.LoadConfig()
-	wsServer.mutex.Lock()
-	wsServer.register <- client
-	wsServer.mutex.Unlock()
+	wsServer.Mutex.Lock()
+	wsServer.Register <- client
+	wsServer.Mutex.Unlock()
 	defer func() {
-		wsServer.unregister <- client
+		wsServer.Unregister <- client
 		ws.Close()
 	}()
 
@@ -118,14 +146,14 @@ func handleWebSocketConnection(ws *websocket.Conn) {
 
 		action := msg.Action
 		if action == "" {
-			websocket.Message.Send(client.Conn, fmt.Sprintln("Invalid message: missing 'action' key"))
+			wsServer.SendMessageToClient(client, fmt.Sprintln("Invalid message: missing 'action' key"))
 			continue
 		}
 		action = strings.ToLower(action)
 
 		topic := msg.Topic
 		if topic == "" {
-			websocket.Message.Send(client.Conn, fmt.Sprintln("Invalid message: missing 'topic' key"))
+			wsServer.SendMessageToClient(client, fmt.Sprintln("Invalid message: missing 'topic' key"))
 			continue
 		}
 		topic = strings.ToLower(topic)
@@ -133,8 +161,7 @@ func handleWebSocketConnection(ws *websocket.Conn) {
 		switch action {
 		case "subscribe":
 			if topic != cfg.Kafka.Topic {
-				websocket.Message.Send(
-					client.Conn, fmt.Sprintf("Invalid subscription request for unknown topic: %s", topic))
+				wsServer.SendMessageToClient(client, fmt.Sprintf("Invalid subscription request for unknown topic: %s", topic))
 
 				continue
 			}
@@ -142,7 +169,7 @@ func handleWebSocketConnection(ws *websocket.Conn) {
 		case "unsubscribe":
 			client.Subscribed[topic] = false
 		default:
-			websocket.Message.Send(client.Conn, fmt.Sprintf("Invalid action: %s", action))
+			wsServer.SendMessageToClient(client, fmt.Sprintf("Invalid action: %s", action))
 		}
 	}
 }
@@ -161,7 +188,7 @@ func ServeWs(w http.ResponseWriter, r *http.Request) {
 }
 
 func StartWebSocketServer(addr string) {
-	go wsServer.run()
+	go wsServer.Run()
 	http.HandleFunc("/ws", ServeWs)
 	err := http.ListenAndServe(addr, nil)
 	if err != nil {
@@ -170,19 +197,19 @@ func StartWebSocketServer(addr string) {
 }
 
 func BroadcastToSubscribedClients(message string) {
-	wsServer.broadcast <- message
+	wsServer.Broadcast <- message
 }
 
 func NotifyAndDisconnectClients() {
 	wsServer.notifyCloseClientsConnections()
 }
 
-func (s *server) notifyCloseClientsConnections() {
-	s.mutex.Lock()
-	defer s.mutex.Unlock()
-	for client := range s.clients {
-		websocket.Message.Send(client.Conn, "Server is shutting down. Please try again later.")
+func (s *Server) notifyCloseClientsConnections() {
+	s.Mutex.Lock()
+	defer s.Mutex.Unlock()
+	for client := range s.Clients {
+		s.SendMessageToClient(client, "Server is shutting down. Please try again later.")
 		client.Conn.Close()
-		delete(s.clients, client)
+		delete(s.Clients, client)
 	}
 }

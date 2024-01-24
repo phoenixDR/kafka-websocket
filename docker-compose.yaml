@@ -26,18 +26,3 @@ services:
       - 8082:8080
     depends_on:
       - kafka
-
-  producer:
-    build:
-      context: .
-      dockerfile: ./cmd/producer/Dockerfile
-    depends_on:
-      - kafka
-  consumer:
-      build:
-        context: .
-        dockerfile: ./cmd/consumer/Dockerfile
-      ports:
-        - "8888:8888"
-      depends_on:
-        - kafka
